@@ -18,17 +18,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/agents-lab-canary-" \
-            --jq '.[].ref' |
-          while IFS= read -r ref; do
-            case "$ref" in
-              refs/tags/agents-lab-canary-*)
-                encoded="${ref#refs/}"
-                gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/${encoded}"
-                ;;
-              *)
-                echo "refusing unexpected ref: $ref" >&2
-                exit 1
-                ;;
-            esac
-          done
+          cleanup_prefix() {
+            prefix="$1"
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/${prefix}" \
+              --jq '.[].ref' |
+            while IFS= read -r ref; do
+              case "$ref" in
+                refs/tags/agents-lab-canary-*|refs/tags/e2e-canary-*)
+                  encoded="${ref#refs/}"
+                  gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/${encoded}"
+                  ;;
+                *)
+                  echo "refusing unexpected ref: $ref" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+          }
+          cleanup_prefix agents-lab-canary-
+          cleanup_prefix e2e-canary-
