@@ -1,0 +1,40 @@
+name: Agents tag recorder
+
+on:
+  push:
+    tags:
+      - 'agents-*'
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    if: github.repository == 'daridor9/hyperlane-ci-permission-lab'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Record sanitized event metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg ref "$GITHUB_REF" \
+            --arg sha "$GITHUB_SHA" \
+            --arg actor "$GITHUB_ACTOR" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg sender "$(jq -r '.sender.login // empty' "$GITHUB_EVENT_PATH")" \
+            --arg pusher "$(jq -r '.pusher.name // empty' "$GITHUB_EVENT_PATH")" \
+            --arg created "$(jq -r '.created // false' "$GITHUB_EVENT_PATH")" \
+            --arg deleted "$(jq -r '.deleted // false' "$GITHUB_EVENT_PATH")" \
+            '{repository:$repository,ref:$ref,sha:$sha,actor:$actor,run_id:$run_id,sender:$sender,pusher:$pusher,created:($created == "true"),deleted:($deleted == "true"),build_attempted:false,publication_attempted:false,deployment_attempted:false,secrets_logged:false}' \
+            > tag-event-evidence.json
+          cat tag-event-evidence.json
+
+      - name: Upload sanitized event evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: agents-tag-event-${{ github.run_id }}
+          path: tag-event-evidence.json
+          retention-days: 14

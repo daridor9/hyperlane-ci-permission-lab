@@ -1,0 +1,152 @@
+name: App token permission probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: permission creates/deletes an inert ref; event creates an agents-* recorder tag
+        required: true
+        default: permission
+        type: choice
+        options:
+          - permission
+          - event
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  probe:
+    if: github.repository == 'daridor9/hyperlane-ci-permission-lab'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Exchange OIDC assertion and exercise canary ref
+        id: probe
+        shell: bash
+        env:
+          LAB_MODE: ${{ inputs.mode }}
+          EXPECTED_REPOSITORY: daridor9/hyperlane-ci-permission-lab
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_REPOSITORY" != "$EXPECTED_REPOSITORY" ]; then
+            echo "refusing unexpected repository: $GITHUB_REPOSITORY" >&2
+            exit 1
+          fi
+
+          audience='claude-code-github-action'
+          oidc_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${audience}"
+          oidc_response="$(curl --silent --show-error \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "$oidc_url")"
+          oidc_token="$(jq -r '.value // empty' <<<"$oidc_response")"
+          if [ -z "$oidc_token" ]; then
+            echo 'OIDC assertion was not returned' >&2
+            exit 1
+          fi
+          echo "::add-mask::$oidc_token"
+
+          exchange_body="$(mktemp)"
+          exchange_status="$(curl --silent --show-error \
+            --output "$exchange_body" --write-out '%{http_code}' \
+            --request POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            'https://api.anthropic.com/api/github/github-app-token-exchange')"
+          unset oidc_token oidc_response
+
+          app_token="$(jq -r '.token // .app_token // empty' "$exchange_body")"
+          if [ -n "$app_token" ]; then
+            echo "::add-mask::$app_token"
+          fi
+
+          if [ "$exchange_status" != 200 ] || [ -z "$app_token" ]; then
+            exchange_error="$(jq -c '{type:(.type // null),message:(.error.message // .message // null),error_code:(.error.details.error_code // null)}' "$exchange_body" 2>/dev/null || printf '{"message":"unparseable exchange response"}')"
+            jq -n \
+              --arg repository "$GITHUB_REPOSITORY" \
+              --arg run_id "$GITHUB_RUN_ID" \
+              --arg mode "$LAB_MODE" \
+              --arg exchange_http_status "$exchange_status" \
+              --argjson exchange_error "$exchange_error" \
+              '{repository:$repository,run_id:$run_id,mode:$mode,exchange_http_status:$exchange_http_status,exchange_error:$exchange_error,create_attempted:false,secrets_logged:false}' \
+              > lab-evidence.json
+            cat lab-evidence.json
+            exit 1
+          fi
+
+          repo_body="$(mktemp)"
+          repo_status="$(curl --silent --show-error \
+            --output "$repo_body" --write-out '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${app_token}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}")"
+          repo_permissions="$(jq -c '.permissions // null' "$repo_body" 2>/dev/null || printf 'null')"
+
+          if [ "$LAB_MODE" = event ]; then
+            short_ref="agents-lab-canary-${GITHUB_RUN_ID}"
+          else
+            short_ref="permission-canary-${GITHUB_RUN_ID}"
+          fi
+          full_ref="refs/tags/${short_ref}"
+          request_body="$(mktemp)"
+          jq -n --arg ref "$full_ref" --arg sha "$GITHUB_SHA" '{ref:$ref,sha:$sha}' > "$request_body"
+
+          create_body="$(mktemp)"
+          create_status="$(curl --silent --show-error \
+            --output "$create_body" --write-out '%{http_code}' \
+            --request POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${app_token}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            --data-binary "@${request_body}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs")"
+
+          created_sha="$(jq -r '.object.sha // empty' "$create_body" 2>/dev/null || true)"
+          create_error="$(jq -c '{message:(.message // null),status:(.status // null)}' "$create_body" 2>/dev/null || printf 'null')"
+          delete_status='not_requested'
+
+          if [ "$LAB_MODE" = permission ] && [ "$create_status" = 201 ]; then
+            delete_status="$(curl --silent --show-error \
+              --output /dev/null --write-out '%{http_code}' \
+              --request DELETE \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${app_token}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/refs/tags/${short_ref}")"
+          fi
+
+          unset app_token
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg workflow_sha "$GITHUB_SHA" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg actor "$GITHUB_ACTOR" \
+            --arg mode "$LAB_MODE" \
+            --arg ref "$full_ref" \
+            --arg exchange_http_status "$exchange_status" \
+            --arg repository_http_status "$repo_status" \
+            --arg create_http_status "$create_status" \
+            --arg created_sha "$created_sha" \
+            --arg delete_http_status "$delete_status" \
+            --argjson repository_permissions "$repo_permissions" \
+            --argjson create_error "$create_error" \
+            '{repository:$repository,workflow_sha:$workflow_sha,run_id:$run_id,actor:$actor,mode:$mode,ref:$ref,exchange_http_status:$exchange_http_status,repository_http_status:$repository_http_status,repository_permissions:$repository_permissions,create_http_status:$create_http_status,created_sha:$created_sha,create_error:$create_error,delete_http_status:$delete_http_status,secrets_logged:false}' \
+            > lab-evidence.json
+          cat lab-evidence.json
+
+          if [ "$create_status" != 201 ]; then
+            exit 2
+          fi
+
+      - name: Upload sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-token-probe-${{ github.run_id }}
+          path: lab-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
