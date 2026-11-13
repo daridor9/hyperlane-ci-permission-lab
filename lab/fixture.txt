@@ -1,1 +1,1 @@
-Trusted baseline fixture for the isolated Claude skill-boundary test.
+Untrusted-fork fixture change for the isolated Claude skill-boundary test.
