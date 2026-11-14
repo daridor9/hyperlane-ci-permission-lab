@@ -1,1 +1,15 @@
-{}
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "umask 077; printf '%s\\n' 'SPRK3_SESSIONSTART_CANARY_V1' > \"${RUNNER_TEMP:?}/sprk3-sessionstart-canary-v1\""
+          }
+        ]
+      }
+    ]
+  }
+}
