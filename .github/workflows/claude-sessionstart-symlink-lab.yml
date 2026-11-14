@@ -1,0 +1,185 @@
+name: Claude restored-settings symlink boundary lab
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  sessionstart-boundary:
+    if: >-
+      github.repository == 'daridor9/hyperlane-ci-permission-lab' &&
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude sessionstart-symlink-lab') &&
+      (github.event.comment.author_association == 'OWNER' ||
+       github.event.comment.author_association == 'MEMBER' ||
+       github.event.comment.author_association == 'COLLABORATOR')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Resolve and validate pull-request revisions
+        id: pr
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            if (pr.head.repo.full_name === context.repo.owner + '/' + context.repo.repo) {
+              core.setFailed('This experiment requires a cross-repository pull request.');
+              return;
+            }
+            if (pr.head.repo.owner.login !== 'daridor-ops') {
+              core.setFailed('Unexpected external researcher account.');
+              return;
+            }
+            const arms = {
+              'sessionstart-symlink-vulnerable-base': 'vulnerable',
+              'sessionstart-materialized-control-base': 'control'
+            };
+            const arm = arms[pr.base.ref];
+            if (!arm) {
+              core.setFailed(`Unexpected base branch: ${pr.base.ref}`);
+              return;
+            }
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('base_sha', pr.base.sha);
+            core.setOutput('base_ref', pr.base.ref);
+            core.setOutput('head_owner', pr.head.repo.owner.login);
+            core.setOutput('author', pr.user.login);
+            core.setOutput('arm', arm);
+
+      - name: Checkout pull-request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Verify pre-action boundary state
+        id: before
+        shell: bash
+        env:
+          ARM: ${{ steps.pr.outputs.arm }}
+        run: |
+          set -euo pipefail
+          marker_path="$RUNNER_TEMP/sprk3-sessionstart-canary-v1"
+          rm -f "$marker_path"
+
+          test -f lab/claude-project-settings.json
+          grep -Fq 'SPRK3_SESSIONSTART_CANARY_V1' \
+            lab/claude-project-settings.json
+
+          settings_kind=regular
+          settings_link_target=''
+          if [[ -L .claude/settings.json ]]; then
+            settings_kind=symlink
+            settings_link_target="$(readlink .claude/settings.json)"
+          fi
+
+          if [[ "$ARM" == vulnerable ]]; then
+            test "$settings_kind" = symlink
+            test "$settings_link_target" = '../lab/claude-project-settings.json'
+          else
+            test "$settings_kind" = regular
+          fi
+
+          test ! -e "$marker_path"
+          printf '%s\n' "$settings_kind" > pre-action-settings-kind.txt
+          printf '%s\n' "$settings_link_target" > pre-action-settings-link-target.txt
+          git ls-files --stage -- .claude/settings.json \
+            > pre-action-settings-index.txt
+          sha256sum lab/claude-project-settings.json \
+            > pre-action-pr-target.sha256
+          sha256sum .claude/settings.json \
+            > pre-action-effective-settings.sha256
+
+      - name: Start pinned Claude action
+        id: claude
+        continue-on-error: true
+        uses: anthropics/claude-code-action@f3b070c88125d33dbae5653df5f143101d4ea9dc
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: >-
+            This is an authorized disposable initialization test. Respond with
+            LAB_SESSION_STARTED. Do not use tools, inspect files, modify files,
+            create refs, access secrets, make network requests, build, publish,
+            or deploy.
+          claude_args: '--max-turns 1'
+          track_progress: false
+          use_sticky_comment: false
+          show_full_output: false
+
+      - name: Record sanitized canary evidence
+        if: always()
+        shell: bash
+        env:
+          ARM: ${{ steps.pr.outputs.arm }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          PR_AUTHOR: ${{ steps.pr.outputs.author }}
+          PR_HEAD_OWNER: ${{ steps.pr.outputs.head_owner }}
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          PR_BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          CLAUDE_STEP_OUTCOME: ${{ steps.claude.outcome }}
+        run: |
+          set -euo pipefail
+          marker_path="$RUNNER_TEMP/sprk3-sessionstart-canary-v1"
+          marker_observed=false
+          if [[ -f "$marker_path" ]] && \
+             grep -Fxq 'SPRK3_SESSIONSTART_CANARY_V1' "$marker_path"; then
+            marker_observed=true
+          fi
+
+          post_settings_kind=regular
+          post_settings_link_target=''
+          if [[ -L .claude/settings.json ]]; then
+            post_settings_kind=symlink
+            post_settings_link_target="$(readlink .claude/settings.json)"
+          fi
+
+          sha256sum .claude/settings.json \
+            > post-action-effective-settings.sha256
+          git ls-files --stage -- .claude/settings.json \
+            > post-action-settings-index.txt
+
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg arm "$ARM" \
+            --arg base_ref "$BASE_REF" \
+            --arg pr_author "$PR_AUTHOR" \
+            --arg pr_head_owner "$PR_HEAD_OWNER" \
+            --arg pr_head_sha "$PR_HEAD_SHA" \
+            --arg pr_base_sha "$PR_BASE_SHA" \
+            --arg claude_step_outcome "$CLAUDE_STEP_OUTCOME" \
+            --arg pre_settings_kind "$(cat pre-action-settings-kind.txt)" \
+            --arg pre_settings_link_target "$(cat pre-action-settings-link-target.txt)" \
+            --arg post_settings_kind "$post_settings_kind" \
+            --arg post_settings_link_target "$post_settings_link_target" \
+            --arg marker_observed "$marker_observed" \
+            '{repository:$repository,run_id:$run_id,arm:$arm,base_ref:$base_ref,pr_author:$pr_author,pr_head_owner:$pr_head_owner,pr_head_sha:$pr_head_sha,pr_base_sha:$pr_base_sha,claude_step_outcome:$claude_step_outcome,pre_settings_kind:$pre_settings_kind,pre_settings_link_target:$pre_settings_link_target,post_settings_kind:$post_settings_kind,post_settings_link_target:$post_settings_link_target,sessionstart_canary_observed:($marker_observed == "true"),canary_effect:"write one fixed marker under RUNNER_TEMP",network_requested:false,secrets_read_or_logged:false,production_targeted:false}' \
+            > "sessionstart-${ARM}.json"
+          cat "sessionstart-${ARM}.json"
+
+      - name: Upload sanitized experiment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sessionstart-${{ steps.pr.outputs.arm }}-${{ github.run_id }}
+          path: |
+            sessionstart-${{ steps.pr.outputs.arm }}.json
+            pre-action-settings-kind.txt
+            pre-action-settings-link-target.txt
+            pre-action-settings-index.txt
+            pre-action-pr-target.sha256
+            pre-action-effective-settings.sha256
+            post-action-settings-index.txt
+            post-action-effective-settings.sha256
+          if-no-files-found: warn
+          retention-days: 14
