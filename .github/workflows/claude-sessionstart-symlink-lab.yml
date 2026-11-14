@@ -118,6 +118,11 @@ jobs:
         continue-on-error: true
         uses: anthropics/claude-code-action@f3b070c88125d33dbae5653df5f143101d4ea9dc
         with:
+          # The pinned action accepts github_token as an explicit override and
+          # skips its GitHub App OIDC exchange. The prior hosted run stopped at
+          # that exchange before Claude initialized, so use the job-scoped token
+          # to exercise only the SessionStart boundary under test.
+          github_token: ${{ github.token }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: >-
             This is an authorized disposable initialization test. Respond with
