@@ -123,6 +123,9 @@ jobs:
           # that exchange before Claude initialized, so use the job-scoped token
           # to exercise only the SessionStart boundary under test.
           github_token: ${{ github.token }}
+          # Permit only the dedicated external researcher account. The action
+          # enables its untrusted-PR environment scrubbing when this is set.
+          allowed_non_write_users: daridor-ops
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: >-
             This is an authorized disposable initialization test. Respond with
