@@ -70,6 +70,10 @@ jobs:
         with:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
+          persist-credentials: false
+          # Authorized disposable lab: the prior step restricts this to the two
+          # named bases and the researcher-controlled daridor-ops fork.
+          allow-unsafe-pr-checkout: true
 
       - name: Verify pre-action boundary state
         id: before
@@ -160,8 +164,13 @@ jobs:
             sha256sum .claude/settings.json \
               > post-action-effective-settings.sha256
           fi
-          git ls-files --stage -- .claude/settings.json \
-            > post-action-settings-index.txt
+          if git rev-parse --git-dir >/dev/null 2>&1; then
+            git ls-files --stage -- .claude/settings.json \
+              > post-action-settings-index.txt
+          else
+            printf '%s\n' 'repository unavailable' \
+              > post-action-settings-index.txt
+          fi
 
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
