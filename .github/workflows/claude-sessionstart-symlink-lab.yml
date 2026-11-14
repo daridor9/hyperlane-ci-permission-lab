@@ -3,6 +3,11 @@ name: Claude restored-settings symlink boundary lab
 on:
   issue_comment:
     types: [created]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches:
+      - sessionstart-symlink-vulnerable-base
+      - sessionstart-materialized-control-base
 
 permissions:
   contents: read
@@ -14,11 +19,14 @@ jobs:
   sessionstart-boundary:
     if: >-
       github.repository == 'daridor9/hyperlane-ci-permission-lab' &&
-      github.event.issue.pull_request &&
-      contains(github.event.comment.body, '@claude sessionstart-symlink-lab') &&
-      (github.event.comment.author_association == 'OWNER' ||
-       github.event.comment.author_association == 'MEMBER' ||
-       github.event.comment.author_association == 'COLLABORATOR')
+      ((github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(github.event.comment.body, '@claude sessionstart-symlink-lab') &&
+        (github.event.comment.author_association == 'OWNER' ||
+         github.event.comment.author_association == 'MEMBER' ||
+         github.event.comment.author_association == 'COLLABORATOR')) ||
+       (github.event_name == 'pull_request_target' &&
+        github.event.pull_request.head.repo.owner.login == 'daridor-ops'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -27,10 +35,11 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
+            const pullNumber = context.payload.pull_request?.number ?? context.issue.number;
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: context.issue.number
+              pull_number: pullNumber
             });
             if (pr.head.repo.full_name === context.repo.owner + '/' + context.repo.repo) {
               core.setFailed('This experiment requires a cross-repository pull request.');
@@ -136,15 +145,21 @@ jobs:
             marker_observed=true
           fi
 
-          post_settings_kind=regular
+          post_settings_kind=absent
           post_settings_link_target=''
           if [[ -L .claude/settings.json ]]; then
             post_settings_kind=symlink
             post_settings_link_target="$(readlink .claude/settings.json)"
+          elif [[ -f .claude/settings.json ]]; then
+            post_settings_kind=regular
           fi
 
-          sha256sum .claude/settings.json \
-            > post-action-effective-settings.sha256
+          if [[ "$post_settings_kind" == absent ]]; then
+            printf '%s\n' absent > post-action-effective-settings.sha256
+          else
+            sha256sum .claude/settings.json \
+              > post-action-effective-settings.sha256
+          fi
           git ls-files --stage -- .claude/settings.json \
             > post-action-settings-index.txt
 
